@@ -22,7 +22,7 @@ from fuse_lowlevel cimport *
 from .macros cimport *
 from posix.stat cimport struct_stat, S_IFMT, S_IFDIR, S_IFREG
 from posix.types cimport mode_t, dev_t, off_t
-from libc.stdint cimport uint32_t
+from libc.stdint cimport int32_t, uint32_t, uintptr_t
 from libc.stdlib cimport const_char
 from libc cimport stdlib, string, errno
 from posix cimport unistd
@@ -57,6 +57,7 @@ cdef extern from "Python.h" nogil:
 
 from pickle import PicklingError
 from queue import Queue
+import contextvars
 import logging
 import os
 import os.path
@@ -358,12 +359,15 @@ cdef class FileInfo:
     cdef public bint direct_io
     cdef public bint keep_cache
     cdef public bint nonseekable
+    cdef public int32_t backing_id
 
-    def __cinit__(self, fh=0, direct_io=0, keep_cache=1, nonseekable=0):
+    def __cinit__(self, fh=0, direct_io=0, keep_cache=1, nonseekable=0,
+                  backing_id=0):
         self.fh = fh
         self.direct_io = direct_io
         self.keep_cache = keep_cache
         self.nonseekable = nonseekable
+        self.backing_id = backing_id
 
     cdef _copy_to_fuse(self, fuse_file_info *out):
         out.fh = self.fh
@@ -385,6 +389,10 @@ cdef class FileInfo:
             out.nonseekable = 1
         else:
             out.nonseekable = 0
+
+        # libfuse auto-sets FOPEN_PASSTHROUGH whenever backing_id > 0,
+        # so no separate flag toggle is needed here.
+        out.backing_id = self.backing_id
 
 
 @cython.freelist(1)

@@ -30,6 +30,57 @@ cdef class _Container:
     cdef struct_stat stat
     cdef uint64_t fh
 
+
+# Per-task storage for the in-flight FUSE request handle, so that
+# passthrough_open()/passthrough_close() can locate the request without
+# changing the public Operations.open/create/release signatures.
+# Python contextvars propagate correctly across asyncio and trio Tasks.
+_active_req = contextvars.ContextVar('pyfuse3_active_req', default=0)
+
+
+def passthrough_open(int fd):
+    '''Register a backing file descriptor for kernel FUSE_PASSTHROUGH.
+
+    Must be called from inside an `Operations.open()` or
+    `Operations.create()` handler. Returns a positive ``backing_id`` on
+    success; the caller should assign that value to ``FileInfo.backing_id``
+    so libfuse emits ``FOPEN_PASSTHROUGH`` in the reply. Returns 0 if the
+    kernel/libfuse rejects the request.
+
+    The kernel keeps its own reference to *fd* after the call, so the
+    caller is free to close *fd* once `passthrough_close()` has been
+    invoked from the corresponding release handler.
+
+    Requires Linux 6.9+, libfuse 3.17+, and ``Operations.enable_passthrough
+    = True`` so the capability is negotiated at mount time.
+    '''
+    cdef uintptr_t req_addr = <uintptr_t> _active_req.get(0)
+    cdef fuse_req_t req
+    if req_addr == 0:
+        raise RuntimeError(
+            'passthrough_open() must be called inside an open() or create() handler'
+        )
+    req = <fuse_req_t><void*> req_addr
+    return fuse_passthrough_open(req, fd)
+
+
+def passthrough_close(int backing_id):
+    '''Release a previously-registered passthrough backing_id.
+
+    Must be called from inside an `Operations.release()` handler with the
+    *backing_id* obtained from the matching `passthrough_open()` call.
+    Returns 0 on success.
+    '''
+    cdef uintptr_t req_addr = <uintptr_t> _active_req.get(0)
+    cdef fuse_req_t req
+    if req_addr == 0:
+        raise RuntimeError(
+            'passthrough_close() must be called inside a release() handler'
+        )
+    req = <fuse_req_t><void*> req_addr
+    return fuse_passthrough_close(req, backing_id)
+
+
 cdef void fuse_init (void *userdata, fuse_conn_info *conn):
     if not conn.capable & FUSE_CAP_READDIRPLUS:
         raise RuntimeError('Kernel too old, pyfuse3 requires kernel 3.9 or newer!')
@@ -44,6 +95,9 @@ cdef void fuse_init (void *userdata, fuse_conn_info *conn):
     if (operations.enable_acl and
         conn.capable & FUSE_CAP_POSIX_ACL):
         conn.want |= FUSE_CAP_POSIX_ACL
+    if (operations.enable_passthrough and
+        conn.capable & FUSE_CAP_PASSTHROUGH):
+        conn.want |= FUSE_CAP_PASSTHROUGH
 
     # Blocking rather than async, in case we decide to let the
     # init handler modify `conn` in the future.
@@ -383,14 +437,18 @@ async def fuse_open_async (_Container c):
     cdef FileInfo fi
 
     ctx = get_request_context(c.req)
+    token = _active_req.set(<uintptr_t> c.req)
 
     try:
-        fi = <FileInfo?> await operations.open(c.ino, c.fi.flags, ctx)
-    except FUSEError as e:
-        ret = fuse_reply_err(c.req, e.errno)
-    else:
-        fi._copy_to_fuse(&c.fi)
-        ret = fuse_reply_open(c.req, &c.fi)
+        try:
+            fi = <FileInfo?> await operations.open(c.ino, c.fi.flags, ctx)
+        except FUSEError as e:
+            ret = fuse_reply_err(c.req, e.errno)
+        else:
+            fi._copy_to_fuse(&c.fi)
+            ret = fuse_reply_open(c.req, &c.fi)
+    finally:
+        _active_req.reset(token)
 
     if ret != 0:
         log.error('fuse_link(): fuse_reply_* failed with %s', strerror(-ret))
@@ -503,12 +561,16 @@ cdef void fuse_release (fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi):
 async def fuse_release_async (_Container c):
     cdef int ret
 
+    token = _active_req.set(<uintptr_t> c.req)
     try:
-        await operations.release(c.fh)
-    except FUSEError as e:
-        ret = fuse_reply_err(c.req, e.errno)
-    else:
-        ret = fuse_reply_err(c.req, 0)
+        try:
+            await operations.release(c.fh)
+        except FUSEError as e:
+            ret = fuse_reply_err(c.req, e.errno)
+        else:
+            ret = fuse_reply_err(c.req, 0)
+    finally:
+        _active_req.reset(token)
 
     if ret != 0:
         log.error('fuse_release(): fuse_reply_* failed with %s', strerror(-ret))
@@ -884,15 +946,19 @@ async def fuse_create_async (_Container c, name):
     cdef FileInfo fi
 
     ctx = get_request_context(c.req)
+    token = _active_req.set(<uintptr_t> c.req)
     try:
-        tmp = await operations.create(c.parent, name, c.mode, c.fi.flags, ctx)
-    except FUSEError as e:
-        ret = fuse_reply_err(c.req, e.errno)
-    else:
-        fi = <FileInfo?> tmp[0]
-        entry = <EntryAttributes?> tmp[1]
-        fi._copy_to_fuse(&c.fi)
-        ret = fuse_reply_create(c.req, &entry.fuse_param, &c.fi)
+        try:
+            tmp = await operations.create(c.parent, name, c.mode, c.fi.flags, ctx)
+        except FUSEError as e:
+            ret = fuse_reply_err(c.req, e.errno)
+        else:
+            fi = <FileInfo?> tmp[0]
+            entry = <EntryAttributes?> tmp[1]
+            fi._copy_to_fuse(&c.fi)
+            ret = fuse_reply_create(c.req, &entry.fuse_param, &c.fi)
+    finally:
+        _active_req.reset(token)
 
     if ret != 0:
         log.error('fuse_create(): fuse_reply_* failed with %s', strerror(-ret))

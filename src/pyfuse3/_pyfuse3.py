@@ -80,6 +80,7 @@ class Operations:
     supports_dot_lookup: bool = True
     enable_writeback_cache: bool = False
     enable_acl: bool = False
+    enable_passthrough: bool = False
 
     def init(self) -> None:
         '''Initialize operations.

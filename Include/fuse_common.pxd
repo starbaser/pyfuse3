@@ -11,7 +11,7 @@ the terms of the GNU LGPL.
 
 from fuse_opt cimport *
 from posix.types cimport off_t
-from libc.stdint cimport uint64_t
+from libc.stdint cimport int32_t, uint64_t
 
 # Based on fuse sources, revision tag fuse_2_9_4
 cdef extern from * nogil: # fuse_common.h should not be included
@@ -23,6 +23,7 @@ cdef extern from * nogil: # fuse_common.h should not be included
         unsigned int nonseekable
         uint64_t fh
         uint64_t lock_owner
+        int32_t backing_id
 
     struct fuse_conn_info:
         unsigned proto_major
@@ -72,6 +73,7 @@ cdef extern from * nogil: # fuse_common.h should not be included
       FUSE_CAP_PARALLEL_DIROPS
       FUSE_CAP_POSIX_ACL
       FUSE_CAP_HANDLE_KILLPRIV
+      FUSE_CAP_PASSTHROUGH
 
     int fuse_set_signal_handlers(fuse_session *se)
     void fuse_remove_signal_handlers(fuse_session *se)

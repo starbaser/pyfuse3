@@ -133,6 +133,8 @@ cdef extern from "<fuse_lowlevel.h>" nogil:
                         double attr_timeout)
     int fuse_reply_readlink(fuse_req_t req, const_char *link)
     int fuse_reply_open(fuse_req_t req, fuse_file_info *fi)
+    int fuse_passthrough_open(fuse_req_t req, int fd)
+    int fuse_passthrough_close(fuse_req_t req, int backing_id)
     int fuse_reply_write(fuse_req_t req, size_t count)
     int fuse_reply_buf(fuse_req_t req, const_char *buf, size_t size)
     int fuse_reply_data(fuse_req_t req, fuse_bufvec *bufv,
